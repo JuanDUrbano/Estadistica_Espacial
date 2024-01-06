@@ -1,0 +1,474 @@
+---
+title: "Big Data e Inteligencia Territorial - FLACSO"
+author: 'Estudiante: Juan D''Urbano'
+date: 'Fecha de entrega: 25/11/20'
+output:
+  html_document:
+    code_folding: show
+    text-align: center
+  word_document: default
+  pdf_document: default
+subtitle: Entrega correspondiente al módulo 5 - Geoestadística - Estadística Espacial
+---
+
+
+
+
+
+<div align="center">
+<font size="6">
+<u>
+Introducción
+</u>
+</font>
+</div>
+
+
+
+<div align="justify">
+
+En este trabajo se intentará un análisis que pueda resultar en un aporte para pensar el contexto geográfico de aplicación de políticas públicas. Particularmente nos centraremos en lo que podría incluirse dentro de la esfera de la salud pública, considerando que la acción directa del Estado y los organismos que de él dependen puede tener un impacto transformador en las condiciones de vida.
+
+Así, aquí se abordará, de manera muy limitada, una arista relacionada a una posible fuente de surgimiento de enfermedades. En tanto consideramos que la carencia de buenas condiciones sanitarias son una base que propicia su aparición, está dentro de la responsabilidad Estatal garantizar una mejora en la situación que contribuya a disminuir las consecuencias. 
+
+Para este trabajo se tomará solo una variable para ejemplificar la idea, y se buscará observar si su distribución espacial puede dar alguna pista sobre donde convendría realizar una hipotética intervención. Las bases de datos públicas tienen numerosas variables que podrían resultar útiles para el análisis, y si bien aquí no serán consideradas por un tema de complejidad, tiempo y extensión, no puede dejar de mencionarse que para obtener una mirada integral y robusta deberían considerarse al menos los datos relacionados a la tenencia de agua y cloaca por red, y la posibilidad de extensión de dichos servicios por parte de la empresa concesionaria.
+
+Dicho eso, aquí se opta por seleccionar la variable de <i>carencias sanitarias</i> relevada por el censo nacional del 2010, la cual inquiere sobre la presencia de retretes o no en el hogar y cuya respuesta afirmativa alcanza para categorizarlo como un hogar con necesidades básicas insatisfechas.
+
+
+
+<div align="center">
+<font size="6">
+<u>
+Desarrollo
+</u>
+</font>
+</div>
+
+Comenzamos entonces cargando los paquetes, datasets y capas geográficas a utilizar. Como ya se mencionó, los datos de <i>carencias sanitarias</i> (también llamado <i>NBI sanitario</i> ) se descargaron de la página del INDEC, mientras que las capas geográficas de la página BA Data.
+
+```{r paquetes, message=FALSE, warning=FALSE}
+
+library(sf)
+library(tidyverse)
+library(spdep)
+library(ggplot2)
+library(ggvoronoi)
+library(tmap)
+library(tmaptools) 
+
+```
+
+
+```{r data y capas, echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE}
+
+hospitales_gcba <- st_read("D:/Documentos/JUAN/Big Data e I.Territorial/Modulo 5 - Priscilla Minotti/Entrega/shapes/hospitales_gcba.shp") %>% st_transform(4326)
+centros_medicos_barriales <- st_read("D:/Documentos/JUAN/Big Data e I.Territorial/Modulo 5 - Priscilla Minotti/Entrega/shapes/centros-medicos-barriales.shp") %>% st_transform(4326)
+centros_salud_privados <- st_read("D:/Documentos/JUAN/Big Data e I.Territorial/Modulo 5 - Priscilla Minotti/Entrega/shapes/centros-de-salud-privados.shp") %>% st_transform(4326)
+centros_salud_nivel_1 <- st_read("D:/Documentos/JUAN/Big Data e I.Territorial/Modulo 5 - Priscilla Minotti/Entrega/shapes/centros_de_salud_nivel_1.shp") %>% st_transform(4326)
+comunas <- st_read("D:/Documentos/JUAN/Big Data e I.Territorial/Modulo 5 - Priscilla Minotti/Entrega/shapes/comunas_CABA.shp") %>% st_transform(4326)
+barrio <- st_read("D:/Documentos/JUAN/Big Data e I.Territorial/Modulo 5 - Priscilla Minotti/Entrega/shapes/barrios_gcba.shp") %>% st_transform(4326)
+radios_NBIsani <- st_read("D:/Documentos/JUAN/Big Data e I.Territorial/Modulo 5 - Priscilla Minotti/Entrega/shapes/radios_NBIsani.shp") %>% st_transform(4326)
+
+```
+
+En primer lugar, conviene hacer algunas transformaciones para el análisis de los datos. Puntualmente hacemos un <i>group by</i> para facilitar la visualización e interpretación, ya que nos centraremos en un análisis a nivel de comunas y no de radios censales. Luego agregamos la columna <i>"cuenta"</i> que contiene los hogares con carencias sanitarias cada mil hogares, posibilitando la comparación entre comunas de distinta área.
+
+```{r procesamiento datos, message=FALSE, warning=FALSE}
+
+radio_a_comuna <- group_by(radios_NBIsani, DEPTO)
+
+NBIsanitario_comuna <- summarise(radio_a_comuna, cuenta = sum(1000*(sum(NBIINSAN_C))/(sum(HOGARES))))
+
+```
+
+Podemos hacer un primer mapa sencillo para tener una idea aproximada de la distribución espacial de los datos
+
+```{r mapa introductorio, message=FALSE, warning=FALSE}
+
+Mapa <- tm_shape(NBIsanitario_comuna) +
+    tm_view(text.size.variable = TRUE) +
+    tm_borders(alpha = 1,
+               col = "black",
+               lwd = 2,
+               lty = 1) +
+    tm_fill("cuenta", alpha = 1, 
+            palette = "-RdYlBu", 
+            title = "Hogares c/ NBI sanitario c/1000") +
+  tm_layout(legend.outside = TRUE, frame = FALSE)
+Mapa
+
+```
+
+Este nos muestra, sin entrar en detalles, que al parecer las comunas del sur de la ciudad son las más perjudicadas. Es de esperar, trabajando con información del distrito más rico del país y con un gran desarrollo sanitario, que los valores en general puedan ser considerados buenos, existiendo pocos hogares por comuna con necesidades sanitarias insatisfechas.
+
+<div align="center">
+<font size="4">
+<u>
+Moran global
+</u>
+</font>
+</div>
+
+Para proseguir haremos un I de Moran global con el fin de saber si hay auto correlación espacial. Para eso realizamos primero la lista de vecinos dejando la opción de <i>reina</i> por default
+
+
+```{r lista de vecinos, message=FALSE, warning=FALSE}
+vecinos <- poly2nb(NBIsanitario_comuna, row.names = "DEPTO")
+```
+
+
+Ahora podemos también explorar la información sobre los vecinos generada:
+
+```{r exploracion de vecinos, message=FALSE, warning=FALSE}
+
+summary(vecinos)
+
+```
+
+```{r sigue exploracion de vecinos, message=FALSE, warning=FALSE}
+
+card(vecinos)
+
+```
+
+De esto podemos verificar la existencia de quince polígonos con un promedio de 4.26 vecinos cada uno. También podemos ver cuantos vecinos tiene cada uno de ellos. Para continuar se mapea la estructura de vecindario, que nos permite ver gráficamente su vinculación.
+
+
+```{r estructura de vecindario, message=FALSE, warning=FALSE}
+
+plot(st_geometry(NBIsanitario_comuna), border = "grey")
+
+plot(vecinos, coordinates(as(NBIsanitario_comuna, "Spatial")), add = TRUE, col = "violet")
+
+```
+
+
+Información similar podemos obtener generando la estructura de pesos de vecinos. En este caso se opta por un estilo <i>B</i> de pesos binarios, por lo que el resultado le asignara un 1 a quienes sean vecinos y un 0 a quienes no lo sean.
+
+```{r estructura de pesos de vecinos, message=FALSE, warning=FALSE}
+
+peso_vecinos <- nb2mat(vecinos, style = 'B')
+
+peso_vecinos
+
+```
+
+
+A continuación transformamos a lista de peso de vecinos. Con un <i>head</i> podemos ver la lista con los valores de los pesos de cada uno.
+
+```{r lista de peso de vecinos, message=FALSE, warning=FALSE}
+
+lista_vecinos <-  nb2listw(vecinos, style ='B')
+
+head(lista_vecinos)
+
+```
+
+Ahora ya podemos calcular el Índice I de Moran global:
+
+```{r indice de Moran Global, message=FALSE, warning=FALSE}
+
+moran.test(NBIsanitario_comuna$cuenta, lista_vecinos)
+
+```
+
+Con un valor de Moran de 0.30 podemos afirmar que existe auto correlación positiva, es decir que hay un patrón de distribución agrupado. El p-valor de 0.003 nos señala que esto es significativo si usamos como convención que deba ser menor a 0.05, por lo que rechazamos la hipótesis de aleatoriedad en la distribución. Resta realizar un correlograma para observar como es la variación según los vecinos que considere.
+
+```{r Moran GLobal correlograma, message=FALSE, warning=FALSE}
+
+correlograma <- sp.correlogram(neighbours = vecinos,var = NBIsanitario_comuna$cuenta,order=3,method="I",zero.policy=TRUE)
+
+plot(correlograma)
+
+```
+
+El resultado nos muestra que considerando al primer vecino la relación es positiva. Si considera un segundo vecino la relación está cercana al 0 en el índice I de Moran y pasa a ser negativa si me extiendo a un tercer polígono.
+
+Ahora bien, para lo que nos interesa aquí el índice I de Moran global no puede aportarnos toda la información que necesitamos, por lo que debemos recurrir al índice I de Moran local. Mientras el global nos indica la existencia de auto correlación espacial, no nos da mayores precisiones sobre lo que sucede al interior. Si nos aproximamos usando un indicador local podemos obtener conocimiento sobre zonas con patrones agrupados donde la correlación espacial sea distinta. 
+
+Antes de proseguir hacia eso hacemos primero un diagrama de dispersión
+
+
+```{r Moran diagrama de dispersión, message=FALSE, warning=FALSE}
+
+moran_scaplot <- moran.plot(NBIsanitario_comuna$cuenta, lista_vecinos, zero.policy = TRUE, labels = as.character(NBIsanitario_comuna$"DEPTO"))
+
+
+```
+
+Este nos muestra que tanto se alejan las unidades de la recta, que grafica la I de Moran. Las líneas punteadas que separan las medianas nos dan una idea de cómo se distribuyen los puntos, prestando especial atención a los cuadrantes de la izquierda abajo y la derecha arriba, donde respectivamente encontramos valores bajos rodeados de valores bajos (<i>cold spots</i>) y valores altos rodeados por valores altos (<i>hot spots</i>). También podemos observar que la comuna 1 tendría mucha influencia en la relación.
+
+Ahora sí, entrando de lleno con un indicador de asociación espacial local seguimos con el Moran local.
+
+
+<div align="center">
+<font size="4">
+<u>
+Moran local
+</u>
+</font>
+</div>
+
+```{r Moran Local, message=FALSE, warning=FALSE}
+
+moran_local <- localmoran(NBIsanitario_comuna$cuenta, lista_vecinos)
+
+head(moran_local)
+
+```
+
+Un simple <i>head</i> ya nos permite ver los valores de Moran para cada comuna y su p-valor. El siguiente paso es unir esta estructura con los datos espaciales:
+
+```{r unión geo Moran Local, message=FALSE, warning=FALSE}
+
+moran_local_comuna <- cbind(NBIsanitario_comuna, moran_local)
+
+```
+
+Ahora resta normalizar las variables. Para la <i>x</i> se le resta a cada valor su media y para la <i>y</i> primero se calculan los valores de <i>lag</i> y se hace lo mismo.
+
+
+```{r normalización, message=FALSE, warning=FALSE}
+
+z_casos <- moran_local_comuna$cuenta - mean(moran_local_comuna$cuenta) 
+
+lag_casos <- lag.listw(lista_vecinos, moran_local_comuna$cuenta)
+
+z_lag_casos <- lag_casos - mean(lag_casos) 
+
+```
+
+
+Se arman los cuadrantes con un vector, utilizando los valores de las variables anteriores. Se determina que un p-valor mayor a 0.05 sea clasificado como no significativo.
+
+```{r cuadrantes, message=FALSE, warning=FALSE}
+
+quad <- vector(mode = "numeric",length = nrow(moran_local_comuna))
+quad[z_casos > 0 & z_lag_casos > 0] <- 1 
+quad[z_casos > 0 & z_lag_casos < 0] <- 2 
+quad[z_casos < 0 & z_lag_casos > 0] <- 3 
+quad[z_casos < 0 & z_lag_casos < 0] <- 4 
+quad[moran_local_comuna$Pr.z...0. > 0.05] <- 5 
+
+```
+
+Agrego los cuadrantes
+
+```{r Unión cuadrantes, message=FALSE, warning=FALSE}
+
+moran_local_comuna$quad <- quad
+
+```
+
+
+Creo la paleta de colores
+
+```{r paleta de colores, message=FALSE, warning=FALSE}
+
+LISA <- c("red", "lightpink","lightblue","blue", "white")
+
+```
+
+Finalmente mapeamos el Moran local.
+
+```{r mapeo Moran Local, message=FALSE, warning=FALSE}
+
+tm_shape(moran_local_comuna) + 
+tm_fill(col = "quad", palette = LISA,  style = "fixed", breaks = c(1,2,3,4,5,6),
+              labels = c("HH", "HL", "LH","LL", "No significativo"),title = "Moran local") +
+tm_legend(outside = TRUE) +
+tm_borders(col = "Grey") +
+  tm_layout(legend.outside = TRUE, frame = FALSE)
+
+```
+
+Como podemos ver, la mayoría de las comunas se grafican como no significativas. Mientras no hay ningún <i>cold spot</i> si podemos ubicar en la comuna 1 un <i> hot spot </i>, al lado de la comuna 4 que presenta valores alto - bajo. Esto en principio nos ayuda a comprender que si bien el I de Moran global arrojaba auto correlación positiva, la zona donde hay agrupación es en estas comunas del sur de la ciudad. Comparándola con el primer mapeo que mostraba la cantidad de hogares con necesidades sanitarias insatisfechas cada mil hogares, no es algo que sorprenda. A modo de ejercicio podemos ver que pasaría si seteamos el umbral de significatividad en 0.1 en lugar del 0.05 que usamos por convención:
+
+```{r mapa p-valor 0.1, message=FALSE, warning=FALSE}
+
+quad <- vector(mode = "numeric",length=nrow(moran_local_comuna))
+quad[z_casos > 0 & z_lag_casos > 0] <- 1 
+quad[z_casos > 0 & z_lag_casos < 0] <- 2 
+quad[z_casos < 0 & z_lag_casos > 0] <- 3 
+quad[z_casos < 0 & z_lag_casos < 0] <- 4 
+quad[moran_local_comuna$Pr.z...0. > 0.1] <- 5 
+
+moran_local_comuna$quad <- quad
+
+tm_shape(moran_local_comuna) + 
+tm_fill(col = "quad", palette = LISA,  style = "fixed", breaks = c(1,2,3,4,5,6),
+              labels = c("HH", "HL", "LH","LL", "No significativo"),title = "Moran local") +
+tm_legend(outside = TRUE) +
+tm_borders(col = "Grey") +
+  tm_layout(legend.outside = TRUE, frame = FALSE)
+
+```
+
+Como vemos, no solo la otra comuna del sur de la ciudad se colorea de rosa, sino que se genera un <i>cold spot</i> en las comunas 13 y 14. En definitiva, ahora tenemos una mayor comprensión de la relación entre la variable seleccionada y el espacio. Las explicaciones a por que esto se distribuye de esta manera pueden ser varias y escapan a los fines de este trabajo. Podemos mencionar una para intentar esbozar un poco de contexto que ayude a la comprensión: la existencia de urbanizaciones con infraestructura de servicios inadecuada o faltante tienen más presencia en el sur de la ciudad y son prácticamente inexistentes en el norte de la misma. Incluso la comuna 1, que contiene el barrio mas exclusivo y caro de la ciudad (Puerto Madero), también tiene a su lado una villa de emergencia (Rodrigo Bueno, en proceso de urbanización). También podría mencionarse la mayor concentración de hogares de nivel socioeconómico mayor en el norte que en el sur de la ciudad, pero como se dijo, escapa a las posibilidades del presente trabajo.
+
+Lo que si puede hacerse es intentar aportar algún otro tipo de dato que ayude al momento de pensar el tipo de intervención a realizarse, o el contexto en el cual la situación actual ya está dada. Para eso, ya que trabajamos con datos vinculados a la salud, podemos imaginar que sería de utilidad conocer si las zonas donde se detecta este <i>hot spot</i> tienen adecuado acceso a centros de atención medica. 
+
+Una vez más, un estudio robusto conllevaría un análisis que excede lo que aquí se realiza, tanto por el análisis en si, como por los datos y también por la vinculación teórica necesaria para justificar cabalmente las implicancias, ramificaciones y vínculo entre la infraestructura, la salud, y la atención. Pero teniendo eso en cuenta, una pequeña muestra puede hacerse, al menos como primera exploración, para conocer lo propuesto anteriormente. Así, se propone hacer triángulos de Voronoi para conocer si quienes están en una comuna pueden atenderse dentro de la misma o deben desplazarse hacia otras.
+
+
+<div align="center">
+<font size="4">
+<u>
+Triángulos de Voronoi
+</u>
+</font>
+</div>
+
+Para esto primero limpiamos los datasets de los centros de salud de CABA manteniendo solo la información relevante y la mapeamos: 
+
+```{r limpieza datasets salud CABA, message=FALSE, warning=FALSE}
+
+hospitales_gcba <- select(hospitales_gcba,
+                 OBJETO)
+
+centros_medicos_barriales <- select(centros_medicos_barriales,
+                                    OBJETO)
+
+centros_salud_nivel_1 <- select(centros_salud_nivel_1,
+                                OBJETO)
+
+centros_salud_privados <- cbind(centros_salud_privados, OBJETO = "CENTRO PRIVADO")
+
+centros_salud_privados <- select(centros_salud_privados,
+         OBJETO)
+
+```
+
+```{r mapeo salud CABA, message=FALSE, warning=FALSE}
+
+ggplot() +
+  geom_sf(data = comunas, alpha = 0.1)+
+    geom_sf(data = hospitales_gcba, aes(color = OBJETO)) +
+    geom_sf(data = centros_medicos_barriales, aes(color = OBJETO)) +
+    geom_sf(data = centros_salud_nivel_1, aes(color = OBJETO)) +
+    geom_sf(data = centros_salud_privados, aes(color = OBJETO)) +
+    theme_void()
+
+```
+
+Luego generamos una <i>bounding box</i> que contemple los límites de la ciudad
+
+```{r bb limites ciudad, message=FALSE, warning=FALSE}
+
+limite <- st_as_sfc(st_bbox(comunas))
+
+limite
+
+```
+
+Ahora podemos generar unos triángulos de Voronoi para determinar visualmente si en las comunas de interés existen centros de atención.
+
+```{r voronoi total, message=TRUE, warning=TRUE}
+
+union_centros_salud <- rbind(hospitales_gcba, centros_medicos_barriales, centros_salud_nivel_1, centros_salud_privados)
+
+
+voronoi <- union_centros_salud %>% 
+          st_geometry() %>%
+          st_union() %>%
+          st_voronoi() %>%
+          st_collection_extract() %>%
+          st_sfc(crs = st_crs(union_centros_salud)) %>% 
+          st_sf() %>% 
+          st_join(union_centros_salud) %>%
+          st_intersection(limite)
+
+```
+
+Hacemos unos retoques para visualizar el tipo de centro medico:
+
+```{r mapeo todos los centros de salud, message=FALSE, warning=FALSE}
+
+voronoi_centros_salud <- tm_shape(voronoi) +
+  tm_fill("OBJETO", alpha = 0.6) +
+  tm_borders(alpha = 0.3) +
+  tm_shape(comunas) +
+  tm_borders(alpha = 0.5,
+               col = "black",
+               lwd = 2,
+               lty = 1) +
+  tm_shape(barrio) +
+  tm_borders(alpha = 0.5,
+               col = "black",
+               lwd = 1,
+               lty = 3) +
+    tm_shape(union_centros_salud) +
+  tm_dots(size = 0.3, col = "OBJETO")+
+  tm_shape(barrio) +
+  tm_borders(alpha = 0.5,
+               col = "grey",
+               lwd = 1,
+               lty = 3) +
+  tm_layout(legend.outside = TRUE, frame = FALSE)
+
+
+  
+voronoi_centros_salud
+```
+
+Podemos ver que tanto la comuna 1 como la 4 cuentan con polígonos que se generan íntegramente en su interior, de varios tipos, lo que indicaría que quienes habitan en las mismas tendrían relativamente cerca una diversidad de lugares donde atenderse en caso de contraer alguna enfermedad. Hay que aclarar que aquí se supone distancia lineal. Si bien en la Ciudad de Buenos Aires, en las zonas en cuestión no existen grandes barreras naturales que impidan la movilidad, si podemos considerar distintos elementos como barreras urbanas, por lo que un estudio más pormenorizado debería contemplar zonas por la que las personas no transitan, por el motivo que fuere, desde una vía de tren hasta motivos atribuibles a un componente social.
+
+Ahora bien, podríamos suponer que los centros médicos barriales y los de nivel 1 no son adecuados para tratar cualquier enfermedad, o no cuentan con todo el equipamiento o profesionales necesarios, a la vez que las instituciones privadas pueden ser restrictivas en su acceso. Con esta consideración conviene volver a realizar el mapeo, pero solo con los hospitales públicos
+
+
+```{r mapeo solo hospitales, message=FALSE, warning=FALSE}
+
+
+voronoi_hospitales <- hospitales_gcba %>% 
+          st_geometry() %>%
+          st_union() %>%
+          st_voronoi() %>%
+          st_collection_extract() %>%
+          st_sfc(crs = st_crs(hospitales_gcba)) %>% 
+          st_sf() %>% 
+          st_join(hospitales_gcba) %>%
+          st_intersection(limite)
+
+voronoi_hospitales_est <- tm_shape(voronoi_hospitales) +
+  tm_fill("OBJETO", alpha = 0.6) +
+  tm_borders(alpha = 0.3) +
+  tm_shape(comunas) +
+  tm_borders(alpha = 0.5,
+               col = "black",
+               lwd = 2,
+               lty = 1) +
+    tm_shape(hospitales_gcba) +
+  tm_dots(size = 0.3, col = "OBJETO") +
+  tm_shape(barrio) +
+  tm_borders(alpha = 0.5,
+               col = "black",
+               lwd = 1,
+               lty = 3) +
+  tm_layout(legend.outside = TRUE, frame = FALSE)
+  
+voronoi_hospitales_est
+```
+
+Se puede ver que la cantidad de polígonos, como se esperaría, disminuye y su superficie aumenta. La comuna 4 tiene polígonos íntegramente en su interior, siendo la comuna con más hospitales de la Ciudad, mientras que la comuna 1, en el otro extremo, no posee ninguno. Se puede visualizar sin embargo que muy cercano al límite entre estas se ubican ocho hospitales, que explicarían casi todos los polígonos presentes en la comuna 1.
+
+
+<div align="center">
+<font size="6">
+<u>
+Conclusiones
+</u>
+</font>
+</div>
+
+Tras lo visto podemos hacer algunos breves comentarios. Por un lado, a través del I de Moran global y local observamos que existe auto correlación espacial, siendo la misma significativa en parte de la zona sur de la Ciudad de Buenos Aires al generar un pequeño <i>hot spot </i> con hogares de relativos altos valores con necesidades sanitarias insatisfechas. Esto, siendo un poco simplistas, nos puede ayudar a determinar donde es importante establecer prioridades de políticas públicas sanitarias para el mejoramiento de las condiciones de vida y la reducción de efectos perjudiciales para la salud. 
+
+Por el otro lado, gracias a los triángulos de Voronoi pudimos establecer, supuestos mediante, que quienes se encuentran en la comuna 1 tienen una relación espacial de distancia distinta (mayor) a quienes se encuentran en la comuna 4. Esto podría ayudar también a reducir una posible zona de acción en términos de atención de salud vinculado a las políticas sanitarias. 
+
+Por último, si bien muchos de los supuestos y limitaciones fueron explicitados anteriormente, hay que decir aquí que el presente trabajo se encuadra más en una lógica de diagnóstico o descripción, y no de búsqueda de los motivos por los cuales los fenómenos descritos suceden. Es decir, más allá de la ayuda que pueda brindar un análisis de este estilo, es necesario conocer en profundidad la multiplicidad de variables que intervienen en un problema complejo.
+
+
+
+</div>
+
+
